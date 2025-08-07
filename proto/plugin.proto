@@ -1,0 +1,21 @@
+// proto/plugin.proto
+syntax = "proto3";
+
+package plugin;
+
+option go_package = "boot-go/internal/grpc/generated";
+
+service BootCodePlugin {
+  rpc GetPromptComponents(GetPromptComponentsRequest) returns (GetPromptComponentsResponse) {}
+}
+
+message GetPromptComponentsRequest {
+  string spec_toml_content = 1;
+}
+
+message GetPromptComponentsResponse {
+  // A map to hold all prompt files, keyed by their filename.
+  map<string, string> components = 1;
+  // The user-specific prompt is kept separate as it's generated from the request.
+  string user_spec_prompt = 2;
+}

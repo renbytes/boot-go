@@ -1,0 +1,1254 @@
+
+--- START OF FILE: .gitignore ---
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Binaries for programs and plugins
+bin/
+pkg/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+.out/
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Log files
+*.log
+boot_debug.log
+
+# Generated protobufs
+internal/grpc/generated/
+--- END OF FILE: .gitignore ---
+
+
+--- START OF FILE: Makefile ---
+.PHONY: all build run test clean tidy install proto
+
+# Variables
+APP_NAME := boot-go
+CMD_PACKAGE := ./cmd/$(APP_NAME)
+OUTPUT_DIR := ./bin
+BINARY_PATH := $(OUTPUT_DIR)/$(APP_NAME)
+
+# Default target
+all: build
+
+# Build the application from the project root.
+build:
+	@echo "Building $(APP_NAME)..."
+	@mkdir -p $(OUTPUT_DIR)
+	@go build -o $(BINARY_PATH) $(CMD_PACKAGE)
+
+# Run the application
+run:
+	@go run $(CMD_PACKAGE)
+
+# Test the application
+test:
+	@echo "Running tests..."
+	@go test -v ./...
+
+# Tidy dependencies
+tidy:
+	@echo "Tidying go.mod..."
+	@go mod tidy
+
+# Generate gRPC code from proto file
+proto:
+	@echo "Generating gRPC code..."
+	@protoc --go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		proto/plugin.proto
+
+# Clean build artifacts
+clean:
+	@echo "Cleaning..."
+	@rm -f $(BINARY_PATH)
+
+# Install the binary to a standard system-wide location.
+install: build
+	@echo "Installing $(APP_NAME) to /usr/local/bin..."
+	@cp $(BINARY_PATH) /usr/local/bin/$(APP_NAME)
+	@echo "$(APP_NAME) installed successfully."
+--- END OF FILE: Makefile ---
+
+
+--- START OF FILE: README.md ---
+# boot-go
+
+A "Prompt Provider" plugin for **boot-code**.
+
+This Go application is a lightweight gRPC server that serves language-specific prompt components to `boot-code`. Its sole responsibility is to provide the building blocks that the core application uses to construct high-quality prompts for generating Go code.
+--- END OF FILE: README.md ---
+
+
+--- START OF FILE: cmd/boot-go/main.go ---
+// File: cmd/boot-go/main.go
+package main
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
+
+	// Use the local module path.
+	pb "boot-go/internal/grpc/generated"
+	"boot-go/pkg/server"
+)
+
+// main is the entry point for the boot-go plugin.
+func main() {
+	log.SetOutput(os.Stderr)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Fatalf("Failed to listen on a port: %v", err)
+	}
+
+	// Create a new gRPC server instance.
+	s := grpc.NewServer()
+
+	// Create the plugin server
+	pluginServer, err := server.New()
+	if err != nil {
+		log.Fatalf("Failed to create plugin server: %v", err)
+	}
+
+	// Register the plugin service
+	pb.RegisterBootCodePluginServer(s, pluginServer)
+	
+	// Add health check service for better gRPC client compatibility
+	healthServer := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(s, healthServer)
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+	
+	// Register reflection for debugging
+	reflection.Register(s)
+
+	// --- The Handshake ---
+	// Output the handshake AFTER the server is fully configured
+	fmt.Printf("1|1|tcp|%s|grpc\n", listener.Addr().String())
+	
+	// Flush stdout to ensure the handshake is sent immediately
+	os.Stdout.Sync()
+
+	// --- Graceful Shutdown Setup ---
+	// Create a channel to receive OS signals.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// --- Run Server in a Goroutine ---
+	serverErrChan := make(chan error, 1)
+	go func() {
+		log.Printf("Plugin gRPC server starting on %s", listener.Addr())
+		if err := s.Serve(listener); err != nil {
+			serverErrChan <- err
+		}
+	}()
+
+	// Give the server a moment to fully start
+	time.Sleep(100 * time.Millisecond)
+
+	// --- Block until a signal is received or server fails ---
+	select {
+	case <-sigChan:
+		log.Println("Shutdown signal received, stopping gRPC server...")
+	case err := <-serverErrChan:
+		log.Printf("gRPC server failed: %v", err)
+		os.Exit(1)
+	}
+
+	// --- Shutdown ---
+	s.GracefulStop()
+	log.Println("gRPC server stopped.")
+}
+--- END OF FILE: cmd/boot-go/main.go ---
+
+
+--- START OF FILE: go.mod ---
+module boot-go
+
+go 1.23.0
+
+toolchain go1.24.6
+
+require (
+	github.com/pelletier/go-toml/v2 v2.2.4
+	google.golang.org/grpc v1.74.2
+)
+
+require (
+	golang.org/x/net v0.40.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/text v0.25.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250528174236-200df99c418a // indirect
+	google.golang.org/protobuf v1.36.6 // indirect
+)
+
+--- END OF FILE: go.mod ---
+
+
+--- START OF FILE: go.sum ---
+github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
+github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
+github.com/go-logr/stdr v1.2.2 h1:hSWxHoqTgW2S2qGc0LTAI563KZ5YKYRhT3MFKZMbjag=
+github.com/go-logr/stdr v1.2.2/go.mod h1:mMo/vtBO5dYbehREoey6XUKy/eSumjCCveDpRre4VKE=
+github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=
+github.com/golang/protobuf v1.5.4/go.mod h1:lnTiLA8Wa4RWRcIUkrtSVa5nRhsEGBg48fD6rSs7xps=
+github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
+github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
+go.opentelemetry.io/auto/sdk v1.1.0 h1:cH53jehLUN6UFLY71z+NDOiNJqDdPRaXzTel0sJySYA=
+go.opentelemetry.io/auto/sdk v1.1.0/go.mod h1:3wSPjt5PWp2RhlCcmmOial7AvC4DQqZb7a7wCow3W8A=
+go.opentelemetry.io/otel v1.36.0 h1:UumtzIklRBY6cI/lllNZlALOF5nNIzJVb16APdvgTXg=
+go.opentelemetry.io/otel v1.36.0/go.mod h1:/TcFMXYjyRNh8khOAO9ybYkqaDBb/70aVwkNML4pP8E=
+go.opentelemetry.io/otel/metric v1.36.0 h1:MoWPKVhQvJ+eeXWHFBOPoBOi20jh6Iq2CcCREuTYufE=
+go.opentelemetry.io/otel/metric v1.36.0/go.mod h1:zC7Ks+yeyJt4xig9DEw9kuUFe5C3zLbVjV2PzT6qzbs=
+go.opentelemetry.io/otel/sdk v1.36.0 h1:b6SYIuLRs88ztox4EyrvRti80uXIFy+Sqzoh9kFULbs=
+go.opentelemetry.io/otel/sdk v1.36.0/go.mod h1:+lC+mTgD+MUWfjJubi2vvXWcVxyr9rmlshZni72pXeY=
+go.opentelemetry.io/otel/sdk/metric v1.36.0 h1:r0ntwwGosWGaa0CrSt8cuNuTcccMXERFwHX4dThiPis=
+go.opentelemetry.io/otel/sdk/metric v1.36.0/go.mod h1:qTNOhFDfKRwX0yXOqJYegL5WRaW376QbB7P4Pb0qva4=
+go.opentelemetry.io/otel/trace v1.36.0 h1:ahxWNuqZjpdiFAyrIoQ4GIiAIhxAunQR6MUoKrsNd4w=
+go.opentelemetry.io/otel/trace v1.36.0/go.mod h1:gQ+OnDZzrybY4k4seLzPAWNwVBBVlF2szhehOBB/tGA=
+golang.org/x/net v0.40.0 h1:79Xs7wF06Gbdcg4kdCCIQArK11Z1hr5POQ6+fIYHNuY=
+golang.org/x/net v0.40.0/go.mod h1:y0hY0exeL2Pku80/zKK7tpntoX23cqL3Oa6njdgRtds=
+golang.org/x/sys v0.33.0 h1:q3i8TbbEz+JRD9ywIRlyRAQbM0qF7hu24q3teo2hbuw=
+golang.org/x/sys v0.33.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
+golang.org/x/text v0.25.0 h1:qVyWApTSYLk/drJRO5mDlNYskwQznZmkpV2c8q9zls4=
+golang.org/x/text v0.25.0/go.mod h1:WEdwpYrmk1qmdHvhkSTNPm3app7v4rsT8F2UD6+VHIA=
+google.golang.org/genproto/googleapis/rpc v0.0.0-20250528174236-200df99c418a h1:v2PbRU4K3llS09c7zodFpNePeamkAwG3mPrAery9VeE=
+google.golang.org/genproto/googleapis/rpc v0.0.0-20250528174236-200df99c418a/go.mod h1:qQ0YXyHHx3XkvlzUtpXDkS29lDSafHMZBAZDc03LQ3A=
+google.golang.org/grpc v1.74.2 h1:WoosgB65DlWVC9FqI82dGsZhWFNBSLjQ84bjROOpMu4=
+google.golang.org/grpc v1.74.2/go.mod h1:CtQ+BGjaAIXHs/5YS3i473GqwBBa1zGQNevxdeBEXrM=
+google.golang.org/protobuf v1.36.6 h1:z1NpPI8ku2WgiWnf+t9wTPsn6eP1L7ksHUlkfLvd9xY=
+google.golang.org/protobuf v1.36.6/go.mod h1:jduwjTPXsFjZGTmRluh+L6NjiWu7pchiJ2/5YcXBHnY=
+
+--- END OF FILE: go.sum ---
+
+
+--- START OF FILE: internal/grpc/generated/plugin.pb.go ---
+// proto/plugin.proto
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// versions:
+// 	protoc-gen-go v1.36.6
+// 	protoc        v5.29.3
+// source: proto/plugin.proto
+
+package generated
+
+import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
+)
+
+const (
+	// Verify that this generated code is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
+	// Verify that runtime/protoimpl is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
+)
+
+type GetPromptComponentsRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SpecTomlContent string                 `protobuf:"bytes,1,opt,name=spec_toml_content,json=specTomlContent,proto3" json:"spec_toml_content,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetPromptComponentsRequest) Reset() {
+	*x = GetPromptComponentsRequest{}
+	mi := &file_proto_plugin_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPromptComponentsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPromptComponentsRequest) ProtoMessage() {}
+
+func (x *GetPromptComponentsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_plugin_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPromptComponentsRequest.ProtoReflect.Descriptor instead.
+func (*GetPromptComponentsRequest) Descriptor() ([]byte, []int) {
+	return file_proto_plugin_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *GetPromptComponentsRequest) GetSpecTomlContent() string {
+	if x != nil {
+		return x.SpecTomlContent
+	}
+	return ""
+}
+
+type GetPromptComponentsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// A map to hold all prompt files, keyed by their filename.
+	Components map[string]string `protobuf:"bytes,1,rep,name=components,proto3" json:"components,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The user-specific prompt is kept separate as it's generated from the request.
+	UserSpecPrompt string `protobuf:"bytes,2,opt,name=user_spec_prompt,json=userSpecPrompt,proto3" json:"user_spec_prompt,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *GetPromptComponentsResponse) Reset() {
+	*x = GetPromptComponentsResponse{}
+	mi := &file_proto_plugin_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPromptComponentsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPromptComponentsResponse) ProtoMessage() {}
+
+func (x *GetPromptComponentsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_plugin_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPromptComponentsResponse.ProtoReflect.Descriptor instead.
+func (*GetPromptComponentsResponse) Descriptor() ([]byte, []int) {
+	return file_proto_plugin_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *GetPromptComponentsResponse) GetComponents() map[string]string {
+	if x != nil {
+		return x.Components
+	}
+	return nil
+}
+
+func (x *GetPromptComponentsResponse) GetUserSpecPrompt() string {
+	if x != nil {
+		return x.UserSpecPrompt
+	}
+	return ""
+}
+
+var File_proto_plugin_proto protoreflect.FileDescriptor
+
+const file_proto_plugin_proto_rawDesc = "" +
+	"\n" +
+	"\x12proto/plugin.proto\x12\x06plugin\"H\n" +
+	"\x1aGetPromptComponentsRequest\x12*\n" +
+	"\x11spec_toml_content\x18\x01 \x01(\tR\x0fspecTomlContent\"\xdb\x01\n" +
+	"\x1bGetPromptComponentsResponse\x12S\n" +
+	"\n" +
+	"components\x18\x01 \x03(\v23.plugin.GetPromptComponentsResponse.ComponentsEntryR\n" +
+	"components\x12(\n" +
+	"\x10user_spec_prompt\x18\x02 \x01(\tR\x0euserSpecPrompt\x1a=\n" +
+	"\x0fComponentsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012r\n" +
+	"\x0eBootCodePlugin\x12`\n" +
+	"\x13GetPromptComponents\x12\".plugin.GetPromptComponentsRequest\x1a#.plugin.GetPromptComponentsResponse\"\x00B!Z\x1fboot-go/internal/grpc/generatedb\x06proto3"
+
+var (
+	file_proto_plugin_proto_rawDescOnce sync.Once
+	file_proto_plugin_proto_rawDescData []byte
+)
+
+func file_proto_plugin_proto_rawDescGZIP() []byte {
+	file_proto_plugin_proto_rawDescOnce.Do(func() {
+		file_proto_plugin_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_plugin_proto_rawDesc), len(file_proto_plugin_proto_rawDesc)))
+	})
+	return file_proto_plugin_proto_rawDescData
+}
+
+var file_proto_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_proto_plugin_proto_goTypes = []any{
+	(*GetPromptComponentsRequest)(nil),  // 0: plugin.GetPromptComponentsRequest
+	(*GetPromptComponentsResponse)(nil), // 1: plugin.GetPromptComponentsResponse
+	nil,                                 // 2: plugin.GetPromptComponentsResponse.ComponentsEntry
+}
+var file_proto_plugin_proto_depIdxs = []int32{
+	2, // 0: plugin.GetPromptComponentsResponse.components:type_name -> plugin.GetPromptComponentsResponse.ComponentsEntry
+	0, // 1: plugin.BootCodePlugin.GetPromptComponents:input_type -> plugin.GetPromptComponentsRequest
+	1, // 2: plugin.BootCodePlugin.GetPromptComponents:output_type -> plugin.GetPromptComponentsResponse
+	2, // [2:3] is the sub-list for method output_type
+	1, // [1:2] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
+}
+
+func init() { file_proto_plugin_proto_init() }
+func file_proto_plugin_proto_init() {
+	if File_proto_plugin_proto != nil {
+		return
+	}
+	type x struct{}
+	out := protoimpl.TypeBuilder{
+		File: protoimpl.DescBuilder{
+			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_plugin_proto_rawDesc), len(file_proto_plugin_proto_rawDesc)),
+			NumEnums:      0,
+			NumMessages:   3,
+			NumExtensions: 0,
+			NumServices:   1,
+		},
+		GoTypes:           file_proto_plugin_proto_goTypes,
+		DependencyIndexes: file_proto_plugin_proto_depIdxs,
+		MessageInfos:      file_proto_plugin_proto_msgTypes,
+	}.Build()
+	File_proto_plugin_proto = out.File
+	file_proto_plugin_proto_goTypes = nil
+	file_proto_plugin_proto_depIdxs = nil
+}
+
+--- END OF FILE: internal/grpc/generated/plugin.pb.go ---
+
+
+--- START OF FILE: internal/grpc/generated/plugin_grpc.pb.go ---
+// proto/plugin.proto
+
+// Code generated by protoc-gen-go-grpc. DO NOT EDIT.
+// versions:
+// - protoc-gen-go-grpc v1.5.1
+// - protoc             v5.29.3
+// source: proto/plugin.proto
+
+package generated
+
+import (
+	context "context"
+	grpc "google.golang.org/grpc"
+	codes "google.golang.org/grpc/codes"
+	status "google.golang.org/grpc/status"
+)
+
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the grpc package it is being compiled against.
+// Requires gRPC-Go v1.64.0 or later.
+const _ = grpc.SupportPackageIsVersion9
+
+const (
+	BootCodePlugin_GetPromptComponents_FullMethodName = "/plugin.BootCodePlugin/GetPromptComponents"
+)
+
+// BootCodePluginClient is the client API for BootCodePlugin service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type BootCodePluginClient interface {
+	GetPromptComponents(ctx context.Context, in *GetPromptComponentsRequest, opts ...grpc.CallOption) (*GetPromptComponentsResponse, error)
+}
+
+type bootCodePluginClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewBootCodePluginClient(cc grpc.ClientConnInterface) BootCodePluginClient {
+	return &bootCodePluginClient{cc}
+}
+
+func (c *bootCodePluginClient) GetPromptComponents(ctx context.Context, in *GetPromptComponentsRequest, opts ...grpc.CallOption) (*GetPromptComponentsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetPromptComponentsResponse)
+	err := c.cc.Invoke(ctx, BootCodePlugin_GetPromptComponents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// BootCodePluginServer is the server API for BootCodePlugin service.
+// All implementations must embed UnimplementedBootCodePluginServer
+// for forward compatibility.
+type BootCodePluginServer interface {
+	GetPromptComponents(context.Context, *GetPromptComponentsRequest) (*GetPromptComponentsResponse, error)
+	mustEmbedUnimplementedBootCodePluginServer()
+}
+
+// UnimplementedBootCodePluginServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedBootCodePluginServer struct{}
+
+func (UnimplementedBootCodePluginServer) GetPromptComponents(context.Context, *GetPromptComponentsRequest) (*GetPromptComponentsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetPromptComponents not implemented")
+}
+func (UnimplementedBootCodePluginServer) mustEmbedUnimplementedBootCodePluginServer() {}
+func (UnimplementedBootCodePluginServer) testEmbeddedByValue()                        {}
+
+// UnsafeBootCodePluginServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to BootCodePluginServer will
+// result in compilation errors.
+type UnsafeBootCodePluginServer interface {
+	mustEmbedUnimplementedBootCodePluginServer()
+}
+
+func RegisterBootCodePluginServer(s grpc.ServiceRegistrar, srv BootCodePluginServer) {
+	// If the following call pancis, it indicates UnimplementedBootCodePluginServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&BootCodePlugin_ServiceDesc, srv)
+}
+
+func _BootCodePlugin_GetPromptComponents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPromptComponentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BootCodePluginServer).GetPromptComponents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BootCodePlugin_GetPromptComponents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BootCodePluginServer).GetPromptComponents(ctx, req.(*GetPromptComponentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// BootCodePlugin_ServiceDesc is the grpc.ServiceDesc for BootCodePlugin service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var BootCodePlugin_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "plugin.BootCodePlugin",
+	HandlerType: (*BootCodePluginServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetPromptComponents",
+			Handler:    _BootCodePlugin_GetPromptComponents_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/plugin.proto",
+}
+
+--- END OF FILE: internal/grpc/generated/plugin_grpc.pb.go ---
+
+
+--- START OF FILE: pkg/prompts/loader.go ---
+// File: pkg/prompts/loader.go
+package prompts
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// Loader is responsible for finding and loading prompt files from disk.
+type Loader struct {
+	// promptsPath stores the absolute path to the 'prompts' directory.
+	promptsPath string
+}
+
+// NewLoader creates a new Loader instance. It determines the absolute path
+// to the 'prompts' directory relative to the running executable. This makes
+// the plugin self-contained and portable.
+func NewLoader() (*Loader, error) {
+	// Find the path of the currently running executable.
+	exePath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("could not get executable path: %w", err)
+	}
+
+	// Resolve any symlinks to get the real path
+	realExePath, err := filepath.EvalSymlinks(exePath)
+	if err != nil {
+		// If we can't resolve symlinks, use the original path
+		realExePath = exePath
+	}
+
+	// The 'prompts' directory should be a sibling of the executable.
+	// For a compiled binary installed via `make install` to /usr/local/bin/,
+	// we need to look in a standard location or relative to the binary.
+	
+	var promptsPath string
+	
+	// Strategy 1: Look for prompts directory as a sibling of the executable
+	execDir := filepath.Dir(realExePath)
+	promptsPath = filepath.Join(execDir, "prompts")
+	
+	if _, err := os.Stat(promptsPath); err == nil {
+		return &Loader{promptsPath: promptsPath}, nil
+	}
+
+	// Strategy 2: For installed binaries, look in standard locations
+	// Check if we're in /usr/local/bin and look for prompts in /usr/local/share/boot-go/
+	if filepath.Base(execDir) == "bin" && filepath.Base(filepath.Dir(execDir)) == "local" {
+		promptsPath = filepath.Join(filepath.Dir(execDir), "share", "boot-go", "prompts")
+		if _, err := os.Stat(promptsPath); err == nil {
+			return &Loader{promptsPath: promptsPath}, nil
+		}
+	}
+
+	// Strategy 3: For development, look relative to the project root
+	// Go up from the executable until we find a directory with prompts/
+	currentDir := execDir
+	for i := 0; i < 5; i++ { // Limit search depth
+		promptsPath = filepath.Join(currentDir, "prompts")
+		if _, err := os.Stat(promptsPath); err == nil {
+			return &Loader{promptsPath: promptsPath}, nil
+		}
+		parentDir := filepath.Dir(currentDir)
+		if parentDir == currentDir {
+			break // Reached root
+		}
+		currentDir = parentDir
+	}
+
+	// Strategy 4: Look in the current working directory (for `go run` during development)
+	cwd, err := os.Getwd()
+	if err == nil {
+		promptsPath = filepath.Join(cwd, "prompts")
+		if _, err := os.Stat(promptsPath); err == nil {
+			return &Loader{promptsPath: promptsPath}, nil
+		}
+	}
+
+	// Strategy 5: Check if there's an environment variable override
+	if envPath := os.Getenv("BOOT_GO_PROMPTS_DIR"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return &Loader{promptsPath: envPath}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("prompts directory not found. Searched in:\n"+
+		"1. %s (sibling of executable)\n"+
+		"2. /usr/local/share/boot-go/prompts (standard install location)\n"+
+		"3. Project root relative to executable\n"+
+		"4. %s (current working directory)\n"+
+		"5. BOOT_GO_PROMPTS_DIR environment variable\n"+
+		"\nPlease ensure the prompts directory exists in one of these locations",
+		filepath.Join(execDir, "prompts"),
+		filepath.Join(cwd, "prompts"))
+}
+
+// LoadAll reads all files from the configured 'prompts' directory and returns
+// their contents in a map, keyed by filename.
+func (l *Loader) LoadAll() (map[string]string, error) {
+	components := make(map[string]string)
+
+	// Read all entries in the prompts directory.
+	entries, err := os.ReadDir(l.promptsPath)
+	if err != nil {
+		return nil, fmt.Errorf("could not read prompts directory '%s': %w", l.promptsPath, err)
+	}
+
+	// Iterate over the directory entries.
+	for _, entry := range entries {
+		// Skip subdirectories.
+		if entry.IsDir() {
+			continue
+		}
+
+		// Construct the full path to the file.
+		filePath := filepath.Join(l.promptsPath, entry.Name())
+
+		// Read the file content.
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("could not read prompt file '%s': %w", filePath, err)
+		}
+
+		// Add the file content to our map.
+		components[entry.Name()] = string(content)
+	}
+
+	return components, nil
+}
+--- END OF FILE: pkg/prompts/loader.go ---
+
+
+--- START OF FILE: pkg/server/server.go ---
+// File: pkg/server/server.go
+package server
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/pelletier/go-toml/v2"
+
+	// Import the generated gRPC code.
+	pb "boot-go/internal/grpc/generated"
+	// Import our local prompt loader.
+    "boot-go/pkg/prompts"
+)
+
+// Server implements the gRPC service defined in the proto file.
+// It must have methods that match the service definition.
+type Server struct {
+	// This ensures that our Server struct correctly implements all methods
+	// required by the BootCodePluginServer interface. If a method is missing,
+	// this will cause a compile-time error.
+	pb.UnimplementedBootCodePluginServer
+
+	// promptLoader is responsible for finding and reading the prompt files.
+	promptLoader *prompts.Loader
+}
+
+// New creates a new instance of our gRPC server.
+// It initializes the prompt loader, which discovers the path to the 'prompts'
+// directory.
+func New() (*Server, error) {
+	loader, err := prompts.NewLoader()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize prompt loader: %w", err)
+	}
+	return &Server{
+		promptLoader: loader,
+	}, nil
+}
+
+// GetPromptComponents is the implementation of the RPC method that boot-code calls.
+// It loads all prompt text files and formats the user's spec to be sent back
+// to the core application.
+func (s *Server) GetPromptComponents(ctx context.Context, req *pb.GetPromptComponentsRequest) (*pb.GetPromptComponentsResponse, error) {
+	log.Println("Received GetPromptComponents request")
+
+	// Load all files from the 'prompts' directory.
+	components, err := s.promptLoader.LoadAll()
+	if err != nil {
+		log.Printf("Error loading prompt components: %v", err)
+		// In a real application, you might return a gRPC error status here.
+		// For simplicity, we'll log the error and continue.
+		return nil, fmt.Errorf("could not load prompt components: %w", err)
+	}
+
+	// Format the user's TOML spec into a readable string for the prompt.
+	userSpecPrompt, err := formatSpecForPrompt(req.SpecTomlContent)
+	if err != nil {
+		log.Printf("Error formatting user spec: %v", err)
+		userSpecPrompt = "--- USER SPECIFICATION ---\nError: Invalid TOML format provided."
+	}
+
+	// Create and return the response object.
+	response := &pb.GetPromptComponentsResponse{
+		Components:     components,
+		UserSpecPrompt: userSpecPrompt,
+	}
+
+	return response, nil
+}
+
+// formatSpecForPrompt parses the raw TOML content from the user's spec
+// and formats it into a string for inclusion in the final prompt.
+func formatSpecForPrompt(specTomlContent string) (string, error) {
+	// Define a struct to unmarshal only the parts of the TOML we need.
+	var spec struct {
+		Description string `toml:"description"`
+		Project     struct {
+			Name string `toml:"name"`
+		} `toml:"project"`
+	}
+
+	// Unmarshal the TOML string into our struct.
+	if err := toml.Unmarshal([]byte(specTomlContent), &spec); err != nil {
+		return "", fmt.Errorf("failed to parse TOML: %w", err)
+	}
+
+	// Set default values if fields are missing.
+	description := "No description provided."
+	if spec.Description != "" {
+		description = spec.Description
+	}
+
+	projectName := "Unnamed project"
+	if spec.Project.Name != "" {
+		projectName = spec.Project.Name
+	}
+
+	return fmt.Sprintf("--- USER SPECIFICATION ---\nProject Name: %s\nDescription: %s", projectName, description), nil
+}
+
+--- END OF FILE: pkg/server/server.go ---
+
+
+--- START OF FILE: prompts/base_instructions.txt ---
+You are an expert-level Go code generator specializing in production-grade applications.
+Your sole task is to write a complete, robust, and idiomatic Go application based on the user's specifications.
+
+CRITICAL RULES:
+
+- You MUST NOT write any conversational text, explanations, or apologies.
+- You MUST generate a complete and runnable implementation for every file required for the project, including a go.mod and a Makefile.
+- You MUST format the entire response as a series of markdown code blocks, each preceded by a ### FILE: <path> marker.
+- All code should be production-ready, demonstrating best practices for Go, including full error handling, clear package organization, and idiomatic concurrency patterns where applicable.
+
+--- END OF FILE: prompts/base_instructions.txt ---
+
+
+--- START OF FILE: prompts/language_rules.txt ---
+### GO-SPECIFIC RULES ###
+
+#### Project Structure & Dependencies
+- The project MUST use standard Go project layout. A `cmd` directory for the main application, and a `pkg` directory for reusable library code.
+- All dependencies MUST be managed in `go.mod`. Run `go mod tidy` to ensure it is clean.
+- A `Makefile` MUST be provided with standard targets: `build`, `run`, `test`, `clean`, and `tidy`.
+
+#### Code Style & Best Practices
+- Code MUST be formatted with `gofmt`.
+- Variable names should be short and idiomatic (e.g., `ctx` for `context.Context`, `err` for `error`).
+- All public functions, types, and constants MUST have clear, concise comments explaining their purpose.
+- Errors MUST be handled explicitly. Do not use blank identifiers (`_`) to ignore errors unless there is a very specific and documented reason.
+- Prefer returning errors over panicking. Panics should only be used for unrecoverable, programmer-error situations.
+- Use table-driven tests for testing multiple scenarios of a function cleanly.
+
+#### Makefile Generation Rules
+- You MUST generate a `Makefile` for every project. It should be well-commented.
+- The `Makefile` MUST define variables to avoid hardcoding paths and names.
+  - `APP_NAME`: Should be dynamically determined from the `go.mod` file. A good implementation is `:= $(shell basename $(shell go list -m))`.
+  - `CMD_PATH`: Should point to the main package, typically `./cmd/$(APP_NAME)`.
+  - `OUTPUT_DIR`: Should be `./bin`.
+- The `build` target MUST compile the binary into the `$(OUTPUT_DIR)`. The command should be `go build -o $(OUTPUT_DIR)/$(APP_NAME) $(CMD_PATH)`.
+- The `run` target MUST execute the main application, for example: `go run $(CMD_PATH)`.
+- The `test` target MUST run all tests verbosely: `go test -v ./...`.
+- The `tidy` target MUST run `go mod tidy`.
+- The `clean` target MUST remove the built binary from the `$(OUTPUT_DIR)`.
+
+#### `go.mod` Generation Rules
+- The module path MUST follow the convention `github.com/user/repo`. For the generated project, use a placeholder like `github.com/example/{{ spec.project.name }}`.
+- It MUST declare a recent Go version, for example: `go 1.21`
+
+#### Web Services (if applicable)
+- If the project is a web service, it MUST use the standard `net/http` package for routing. Third-party routers like `gorilla/mux` or `chi` are acceptable if specified.
+- Use struct tags for JSON marshaling and unmarshaling (e.g., `json:"fieldName"`).
+- Handlers should have the standard `func(w http.ResponseWriter, r *http.Request)` signature.
+- Leverage context for request-scoped values and cancellation.
+
+--- END OF FILE: prompts/language_rules.txt ---
+
+
+--- START OF FILE: prompts/review_instructions.txt ---
+You are a Principal Software Engineer and a Go expert, assigned to review and refactor code written by a junior developer.
+Your task is to analyze the `GENERATED CODE TO REVIEW` section below. While the code might be functionally correct, it likely lacks production-quality standards.
+Rewrite the entire codebase to be highly performant, scalable, idiomatic, and maintainable, following all Go best practices.
+
+The original specification is provided for context. The final output must adhere to this specification.
+
+---
+ORIGINAL SPECIFICATION:
+
+Language: {language}
+Description: {description}
+
+---
+GENERATED CODE TO REVIEW:
+{initial_code}
+
+---
+REFACTORING INSTRUCTIONS:
+
+- Analyze the generated code for violations of the Go-specific rules.
+- Improve error handling by adding more context to errors (`fmt.Errorf("context: %w", err)`).
+- Refactor any monolithic functions into smaller, more testable units.
+- Ensure all public functions and types are properly commented.
+- Check for any inefficient patterns (e.g., unnecessary allocations in loops).
+- Ensure the project structure (`cmd`, `pkg`) and dependencies (`go.mod`) are correct.
+
+Begin your response immediately with `### FILE: <path>`. Do not include any conversational preamble, summary, or explanation. Your entire response must be only the generated code files.
+
+--- END OF FILE: prompts/review_instructions.txt ---
+
+
+--- START OF FILE: proto/plugin.pb.go ---
+// proto/plugin.proto
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// versions:
+// 	protoc-gen-go v1.36.6
+// 	protoc        v5.29.3
+// source: proto/plugin.proto
+
+package generated
+
+import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
+)
+
+const (
+	// Verify that this generated code is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
+	// Verify that runtime/protoimpl is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
+)
+
+type GetPromptComponentsRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SpecTomlContent string                 `protobuf:"bytes,1,opt,name=spec_toml_content,json=specTomlContent,proto3" json:"spec_toml_content,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetPromptComponentsRequest) Reset() {
+	*x = GetPromptComponentsRequest{}
+	mi := &file_proto_plugin_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPromptComponentsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPromptComponentsRequest) ProtoMessage() {}
+
+func (x *GetPromptComponentsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_plugin_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPromptComponentsRequest.ProtoReflect.Descriptor instead.
+func (*GetPromptComponentsRequest) Descriptor() ([]byte, []int) {
+	return file_proto_plugin_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *GetPromptComponentsRequest) GetSpecTomlContent() string {
+	if x != nil {
+		return x.SpecTomlContent
+	}
+	return ""
+}
+
+type GetPromptComponentsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// A map to hold all prompt files, keyed by their filename.
+	Components map[string]string `protobuf:"bytes,1,rep,name=components,proto3" json:"components,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The user-specific prompt is kept separate as it's generated from the request.
+	UserSpecPrompt string `protobuf:"bytes,2,opt,name=user_spec_prompt,json=userSpecPrompt,proto3" json:"user_spec_prompt,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *GetPromptComponentsResponse) Reset() {
+	*x = GetPromptComponentsResponse{}
+	mi := &file_proto_plugin_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPromptComponentsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPromptComponentsResponse) ProtoMessage() {}
+
+func (x *GetPromptComponentsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_plugin_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPromptComponentsResponse.ProtoReflect.Descriptor instead.
+func (*GetPromptComponentsResponse) Descriptor() ([]byte, []int) {
+	return file_proto_plugin_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *GetPromptComponentsResponse) GetComponents() map[string]string {
+	if x != nil {
+		return x.Components
+	}
+	return nil
+}
+
+func (x *GetPromptComponentsResponse) GetUserSpecPrompt() string {
+	if x != nil {
+		return x.UserSpecPrompt
+	}
+	return ""
+}
+
+var File_proto_plugin_proto protoreflect.FileDescriptor
+
+const file_proto_plugin_proto_rawDesc = "" +
+	"\n" +
+	"\x12proto/plugin.proto\x12\x06plugin\"H\n" +
+	"\x1aGetPromptComponentsRequest\x12*\n" +
+	"\x11spec_toml_content\x18\x01 \x01(\tR\x0fspecTomlContent\"\xdb\x01\n" +
+	"\x1bGetPromptComponentsResponse\x12S\n" +
+	"\n" +
+	"components\x18\x01 \x03(\v23.plugin.GetPromptComponentsResponse.ComponentsEntryR\n" +
+	"components\x12(\n" +
+	"\x10user_spec_prompt\x18\x02 \x01(\tR\x0euserSpecPrompt\x1a=\n" +
+	"\x0fComponentsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012r\n" +
+	"\x0eBootCodePlugin\x12`\n" +
+	"\x13GetPromptComponents\x12\".plugin.GetPromptComponentsRequest\x1a#.plugin.GetPromptComponentsResponse\"\x00B\x19Z\x17internal/grpc/generatedb\x06proto3"
+
+var (
+	file_proto_plugin_proto_rawDescOnce sync.Once
+	file_proto_plugin_proto_rawDescData []byte
+)
+
+func file_proto_plugin_proto_rawDescGZIP() []byte {
+	file_proto_plugin_proto_rawDescOnce.Do(func() {
+		file_proto_plugin_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_plugin_proto_rawDesc), len(file_proto_plugin_proto_rawDesc)))
+	})
+	return file_proto_plugin_proto_rawDescData
+}
+
+var file_proto_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_proto_plugin_proto_goTypes = []any{
+	(*GetPromptComponentsRequest)(nil),  // 0: plugin.GetPromptComponentsRequest
+	(*GetPromptComponentsResponse)(nil), // 1: plugin.GetPromptComponentsResponse
+	nil,                                 // 2: plugin.GetPromptComponentsResponse.ComponentsEntry
+}
+var file_proto_plugin_proto_depIdxs = []int32{
+	2, // 0: plugin.GetPromptComponentsResponse.components:type_name -> plugin.GetPromptComponentsResponse.ComponentsEntry
+	0, // 1: plugin.BootCodePlugin.GetPromptComponents:input_type -> plugin.GetPromptComponentsRequest
+	1, // 2: plugin.BootCodePlugin.GetPromptComponents:output_type -> plugin.GetPromptComponentsResponse
+	2, // [2:3] is the sub-list for method output_type
+	1, // [1:2] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
+}
+
+func init() { file_proto_plugin_proto_init() }
+func file_proto_plugin_proto_init() {
+	if File_proto_plugin_proto != nil {
+		return
+	}
+	type x struct{}
+	out := protoimpl.TypeBuilder{
+		File: protoimpl.DescBuilder{
+			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_plugin_proto_rawDesc), len(file_proto_plugin_proto_rawDesc)),
+			NumEnums:      0,
+			NumMessages:   3,
+			NumExtensions: 0,
+			NumServices:   1,
+		},
+		GoTypes:           file_proto_plugin_proto_goTypes,
+		DependencyIndexes: file_proto_plugin_proto_depIdxs,
+		MessageInfos:      file_proto_plugin_proto_msgTypes,
+	}.Build()
+	File_proto_plugin_proto = out.File
+	file_proto_plugin_proto_goTypes = nil
+	file_proto_plugin_proto_depIdxs = nil
+}
+
+--- END OF FILE: proto/plugin.pb.go ---
+
+
+--- START OF FILE: proto/plugin.proto ---
+// proto/plugin.proto
+syntax = "proto3";
+
+package plugin;
+
+option go_package = "boot-go/internal/grpc/generated";
+
+service BootCodePlugin {
+  rpc GetPromptComponents(GetPromptComponentsRequest) returns (GetPromptComponentsResponse) {}
+}
+
+message GetPromptComponentsRequest {
+  string spec_toml_content = 1;
+}
+
+message GetPromptComponentsResponse {
+  // A map to hold all prompt files, keyed by their filename.
+  map<string, string> components = 1;
+  // The user-specific prompt is kept separate as it's generated from the request.
+  string user_spec_prompt = 2;
+}
+--- END OF FILE: proto/plugin.proto ---
+
+
+--- START OF FILE: proto/plugin_grpc.pb.go ---
+// proto/plugin.proto
+
+// Code generated by protoc-gen-go-grpc. DO NOT EDIT.
+// versions:
+// - protoc-gen-go-grpc v1.5.1
+// - protoc             v5.29.3
+// source: proto/plugin.proto
+
+package generated
+
+import (
+	context "context"
+	grpc "google.golang.org/grpc"
+	codes "google.golang.org/grpc/codes"
+	status "google.golang.org/grpc/status"
+)
+
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the grpc package it is being compiled against.
+// Requires gRPC-Go v1.64.0 or later.
+const _ = grpc.SupportPackageIsVersion9
+
+const (
+	BootCodePlugin_GetPromptComponents_FullMethodName = "/plugin.BootCodePlugin/GetPromptComponents"
+)
+
+// BootCodePluginClient is the client API for BootCodePlugin service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type BootCodePluginClient interface {
+	GetPromptComponents(ctx context.Context, in *GetPromptComponentsRequest, opts ...grpc.CallOption) (*GetPromptComponentsResponse, error)
+}
+
+type bootCodePluginClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewBootCodePluginClient(cc grpc.ClientConnInterface) BootCodePluginClient {
+	return &bootCodePluginClient{cc}
+}
+
+func (c *bootCodePluginClient) GetPromptComponents(ctx context.Context, in *GetPromptComponentsRequest, opts ...grpc.CallOption) (*GetPromptComponentsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetPromptComponentsResponse)
+	err := c.cc.Invoke(ctx, BootCodePlugin_GetPromptComponents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// BootCodePluginServer is the server API for BootCodePlugin service.
+// All implementations must embed UnimplementedBootCodePluginServer
+// for forward compatibility.
+type BootCodePluginServer interface {
+	GetPromptComponents(context.Context, *GetPromptComponentsRequest) (*GetPromptComponentsResponse, error)
+	mustEmbedUnimplementedBootCodePluginServer()
+}
+
+// UnimplementedBootCodePluginServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedBootCodePluginServer struct{}
+
+func (UnimplementedBootCodePluginServer) GetPromptComponents(context.Context, *GetPromptComponentsRequest) (*GetPromptComponentsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetPromptComponents not implemented")
+}
+func (UnimplementedBootCodePluginServer) mustEmbedUnimplementedBootCodePluginServer() {}
+func (UnimplementedBootCodePluginServer) testEmbeddedByValue()                        {}
+
+// UnsafeBootCodePluginServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to BootCodePluginServer will
+// result in compilation errors.
+type UnsafeBootCodePluginServer interface {
+	mustEmbedUnimplementedBootCodePluginServer()
+}
+
+func RegisterBootCodePluginServer(s grpc.ServiceRegistrar, srv BootCodePluginServer) {
+	// If the following call pancis, it indicates UnimplementedBootCodePluginServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&BootCodePlugin_ServiceDesc, srv)
+}
+
+func _BootCodePlugin_GetPromptComponents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPromptComponentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BootCodePluginServer).GetPromptComponents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BootCodePlugin_GetPromptComponents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BootCodePluginServer).GetPromptComponents(ctx, req.(*GetPromptComponentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// BootCodePlugin_ServiceDesc is the grpc.ServiceDesc for BootCodePlugin service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var BootCodePlugin_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "plugin.BootCodePlugin",
+	HandlerType: (*BootCodePluginServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetPromptComponents",
+			Handler:    _BootCodePlugin_GetPromptComponents_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/plugin.proto",
+}
+
+--- END OF FILE: proto/plugin_grpc.pb.go ---
