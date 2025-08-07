@@ -4,6 +4,8 @@
 *.dll
 *.so
 *.dylib
+/dist
+.DS_Store
 
 # Binaries for programs and plugins
 bin/
