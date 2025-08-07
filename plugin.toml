@@ -1,0 +1,14 @@
+# file: plugin.toml
+# This manifest tells the boot-code ecosystem how to handle this plugin.
+
+[plugin]
+name = "boot-go"
+language = "go"
+description = "A prompt provider plugin for generating production-grade Go applications."
+
+# This is the critical new field.
+# It explicitly tells the installer how to acquire the plugin.
+#
+# "binary": Download from GitHub releases. (For Rust, Go, etc.)
+# "pipx": Install from git using pipx. (For Python)
+install_strategy = "binary"
